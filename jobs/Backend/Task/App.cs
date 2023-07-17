@@ -4,6 +4,7 @@ using ExchangeRateUpdater.Models.Types;
 using ExchangeRateUpdater.Persistence;
 using ExchangeRateUpdater.Services;
 using Microsoft.Extensions.Logging;
+using OneOf;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -16,6 +17,10 @@ internal class App
     private readonly IExchangeRateRepository _exchangeRateRepository;
     private readonly IExchangeRateProvider _exchangeRateProvider;
     private readonly ILogger<App> _logger;
+
+    private IEnumerable<Currency> _sourceCurrencies; 
+    private OneOf<IEnumerable<ExchangeRate>, Error> _exchangeRatesResult;
+    private int _resultCode;
 
     public App(ILogger<App> logger,
         IExchangeRateRepository exchangeRateRepository,
@@ -30,42 +35,74 @@ internal class App
     {
         try
         {
-            var sourceCurrencies = _exchangeRateRepository.GetSourceCurrencies();
-            var exchangeRatesResult = await _exchangeRateProvider.GetExchangeRates(sourceCurrencies);
-
-            var code = 0;
-            exchangeRatesResult.Switch(exchangeRates =>
-            {
-                PrintExchangeRates(exchangeRates);
-            },
-            error =>
-            {
-                PrintValidationError(error);
-                code = -1;
-            });
-
-            return code;
+            return await GetSourceCurrencies()
+                .GetExchangeRates().Result
+                .PrintExchangeRates()
+                .OrPrintValidationError()
+                .GetResultCode();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Could not retrieve exchange rates: '{ex.Message}'.");
-            _logger.LogError(ex, "Unhandled exception occured.");
-            return -2;
+            return await PrintExceptionMessage(ex)
+            .LogExceptionError(ex)
+            .GetResultCode();
         }
     }
 
-    private static void PrintExchangeRates(IEnumerable<ExchangeRate> rates)
+    private App GetSourceCurrencies()
     {
+        _sourceCurrencies = _exchangeRateRepository.GetSourceCurrencies();
+        return this;
+    }
+
+    private async Task<App> GetExchangeRates()
+    {
+        _exchangeRatesResult = await _exchangeRateProvider.GetExchangeRates(_sourceCurrencies);
+        return this;
+    }
+
+    private App PrintExchangeRates()
+    {
+        if (!_exchangeRatesResult.IsT0)
+        { 
+            _resultCode = -1;
+            return this;
+        }
+
+        var rates = _exchangeRatesResult.AsT0;
+
         Console.WriteLine($"Successfully retrieved {rates.Count()} exchange rates:");
         foreach (var rate in rates)
         {
             Console.WriteLine(rate.ToStringFormat());
         }
+        return this;
     }
 
-    private static void PrintValidationError(Error error)
+    private App OrPrintValidationError()
     {
+        if (!_exchangeRatesResult.IsT1) return this;
+
+        var error = _exchangeRatesResult.AsT1;
+
         Console.WriteLine(error.ToString());
+
+        return this;
     }
+
+    private App PrintExceptionMessage(Exception ex)
+    {
+        Console.WriteLine($"Could not retrieve exchange rates: '{ex.Message}'.");
+        return this;
+    }
+
+    private App LogExceptionError(Exception ex)
+    {
+        _logger.LogError(ex, "Unhandled exception occured.");
+        _resultCode = -2;
+        return this;
+    }
+
+    private async Task<int> GetResultCode() => await Task.FromResult(_resultCode);
 }
 
